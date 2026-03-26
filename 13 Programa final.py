@@ -13,7 +13,13 @@ ventana.resizable(0,0)
 ventana.title("Proyecto procesamiento de imagen con webcam")
 
 # Variables globales
-global Captura, CapturaG
+global Captura, CapturaG, ImgRec
+global x1_mouse, y1_mouse, x2_mouse, y2_mouse
+x1_mouse = 0
+y1_mouse = 0
+x2_mouse = 0
+y2_mouse = 0
+seleccionando = False
 
 # Inicia cámara web
 def camara():
@@ -29,7 +35,7 @@ def iniciar():
         if ret == True:
             frame = imutils.resize(frame, width=311)
             frame = imutils.resize(frame, height=241)
-            ImagenCamara = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            ImagenCamara = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
             im = Image.fromarray(ImagenCamara)
             img = ImageTk.PhotoImage(image=im)
             LImagen.configure(image= img)
@@ -115,18 +121,93 @@ def manchasG():
     
 def mostrar_coordenadas(event):
     coordenadas['text']=f'x={event.x}, y={event.y}'
+
+def inicio_recorte(event):
+    global x1_mouse, y1_mouse, seleccionando
+    x1_mouse = event.x
+    y1_mouse = event.y
+    seleccionando = True
+    
+def fin_recorte(event):
+    global x1_mouse, y1_mouse, x2_mouse, y2_mouse, seleccionando
+    x2_mouse = event.x
+    y2_mouse = event.y
+    seleccionando = False
+    realizar_recorte_automatico()
+    
+def movimiento_mouse(event):
+    global x1_mouse, y1_mouse, x2_mouse, y2_mouse, seleccionando, Captura
+    if seleccionando and Captura is not None:
+        x2_mouse = event.x
+        y2_mouse = event.y
+        dibujar_borde_recorte()
+
+def dibujar_borde_recorte():
+    global Captura
+    if Captura is None:
+        return
+    
+    img_preview = Captura.copy()
+    
+    # Obtener coordenadas del rectángulo
+    px1 = min(x1_mouse, x2_mouse)
+    py1 = min(y1_mouse, y2_mouse)
+    px2 = max(x1_mouse, x2_mouse)
+    py2 = max(y1_mouse, y2_mouse)
+    
+    # Asegurarse que están dentro de los límites
+    px1 = max(0, px1)
+    py1 = max(0, py1)
+    px2 = min(img_preview.shape[1], px2)
+    py2 = min(img_preview.shape[0], py2)
+    
+    # Dibujar rectángulo con borde de color (cyan)
+    cv2.rectangle(img_preview, (px1, py1), (px2, py2), (0, 255, 255), 2)
+    
+    # Mostrar en el label
+    im = Image.fromarray(img_preview)
+    img = ImageTk.PhotoImage(image=im)
+    LImagenRecorte.configure(image=img)
+    LImagenRecorte.image = img
+
+def realizar_recorte_automatico():
+    global ImgRec, x1_mouse, y1_mouse, x2_mouse, y2_mouse, Captura
+    
+    if Captura is None:
+        return
+    
+    # Obtener coordenadas del rectángulo
+    px1 = min(x1_mouse, x2_mouse)
+    py1 = min(y1_mouse, y2_mouse)
+    px2 = max(x1_mouse, x2_mouse)
+    py2 = max(y1_mouse, y2_mouse)
+    
+    # Asegurarse que están dentro de los límites
+    px1 = max(0, px1)
+    py1 = max(0, py1)
+    px2 = min(Captura.shape[1], px2)
+    py2 = min(Captura.shape[0], py2)
+    
+    # Evitar recortes de tamaño 0
+    if px1 >= px2 or py1 >= py2:
+        return
+    
+    # Realizar el recorte
+    ImgRec = Captura[py1:py2, px1:px2]
+    
+    # Mostrar la imagen recortada
+    Im = Image.fromarray(ImgRec)
+    ImRec = ImageTk.PhotoImage(image=Im)
+    LImagenROI.configure(image=ImRec)
+    LImagenROI.image = ImRec
+    
+    # Mostrar las coordenadas usadas
+    coordenadas['text'] = f'Recortado: x1={px1}, y1={py1}, x2={px2}, y2={py2}'
     
 def recortar():
     global ImgRec
-    Vx1=int(x1.get())
-    Vy1=int(y1.get())
-    Vx2=int(x2.get())
-    Vy2=int(y2.get())
-    ImgRec=Captura[Vy1:Vy2, Vx1:Vx2]
-    Im=Image.fromarray(ImgRec)
-    ImRec=ImageTk.PhotoImage(image=Im)
-    LImagenROI.configure(image=ImRec)
-    LImagenROI.image=ImRec
+    # Esta función ahora no se usa, pero la dejamos por compatibilidad
+    realizar_recorte_automatico()
     
 # Botones
 BCamara = tk.Button(ventana, text="Iniciar cámara", command=camara)
@@ -141,20 +222,19 @@ BBinary = tk.Button(ventana, text="Umbralización", command=umbralizacion)
 BBinary.place(x=800,y=310,width=90,height=23)
 BManchasG = tk.Button(ventana, text="Análisis de Manchas", command=manchasG)    
 BManchasG.place(x=1100,y=310,width=131,height=23)
-BRecortar = tk.Button(ventana, text="Recortar", command=recortar)
-BRecortar.place(x=155,y=700,width=80,height=23)
 
 # SpinBox
 numeroUmbra = tk.Spinbox(ventana, from_=0, to=255)
 numeroUmbra.place(x=900, y=331, width=42, height=23)
-x1 = tk.Spinbox(ventana, from_=0, to=298)
-x1.place(x=155, y=630, width=42, height=23)
-y1 = tk.Spinbox(ventana, from_=0, to=239)
-y1.place(x=240, y=630, width=42, height=23)
-x2 = tk.Spinbox(ventana, from_=1, to=298)
-x2.place(x=140, y=660, width=42, height=23)
-y2 = tk.Spinbox(ventana, from_=1, to=239)
-y2.place(x=240, y=660, width=42, height=23)
+# SpinBox para coordenadas removidos - ahora se usan coordenadas del mouse
+# x1 = tk.Spinbox(ventana, from_=0, to=298)
+# x1.place(x=155, y=630, width=42, height=23)
+# y1 = tk.Spinbox(ventana, from_=0, to=239)
+# y1.place(x=240, y=630, width=42, height=23)
+# x2 = tk.Spinbox(ventana, from_=1, to=298)
+# x2.place(x=140, y=660, width=42, height=23)
+# y2 = tk.Spinbox(ventana, from_=1, to=239)
+# y2.place(x=240, y=660, width=42, height=23)
 
 # Label
 LRed = tk.Label(ventana, text="R")
@@ -167,14 +247,8 @@ coordenadasTitulo = tk.Label(ventana, text="Coordenadas")
 coordenadasTitulo.place(x=505, y=310)
 coordenadas = tk.Label(ventana, text="")
 coordenadas.place(x=495, y=330)
-Lx1 = tk.Label(ventana, text="x1")
-Lx1.place(x=120, y=630)
-Ly1 = tk.Label(ventana, text="y1")
-Ly1.place(x=220, y=630)
-Lx2 = tk.Label(ventana, text="x2")
-Lx2.place(x=120, y=660)
-Ly2 = tk.Label(ventana, text="y2")
-Ly2.place(x=220, y=660)
+LRecorte = tk.Label(ventana, text="Arrastra para recortar")
+LRecorte.place(x=80, y=615)
 
 # Logo Universidad
 logo = tk.PhotoImage(file="Tutorial Procesamiento de Imagen con webcam/13 Programa final - Procesamiento de imágenes usando webcam/LogoUBB.png")
@@ -201,6 +275,10 @@ LImagenManchas = tk.Label(ventana,background="gray")
 LImagenManchas.place(x=730,y=380,width=301,height=240)
 LImagenRecorte = tk.Label(ventana,background="gray")
 LImagenRecorte.place(x=50,y=380,width=301,height=240)
+# Bindings para recorte automático con mouse
+LImagenRecorte.bind('<Button-1>', inicio_recorte)
+LImagenRecorte.bind('<B1-Motion>', movimiento_mouse)
+LImagenRecorte.bind('<ButtonRelease-1>', fin_recorte)
 
 # Cuadro de texto
 CajaTexto = tk.Text(ventana, state="disabled")
@@ -229,15 +307,15 @@ SBlueD.place(x=580, y=700)
 #Pasos
 paso1 = tk.Label(ventana, text="Paso 1: Iniciar cámara y tomar una foto")
 paso1.place(x=70, y=20)
-paso2 = tk.Label(ventana, text="Paso 2: Revisar las coordenadas para recortar la foto")
+paso2 = tk.Label(ventana, text="Paso 2: Arrastra el mouse para seleccionar el área a recortar")
 paso2.place(x=400, y=20)
-paso3 = tk.Label(ventana, text="Paso 3: Escribir las coordenadas para recortar la foto")
-paso3.place(x=50, y=730)
-paso4a = tk.Label(ventana, text="Paso 4a: Elegir un número entre 0 y 255 para umbralizar la\n imagen en escala de grises")
-paso4a.place(x=720, y=10)
-paso4b = tk.Label(ventana, text="Paso 4b: Elegir un rango de números RGB para\n umbralizar la imagen a color")
+paso3 = tk.Label(ventana, text="Paso 3a: Elegir un número entre 0 y 255 para umbralizar la imagen")
+paso3.place(x=380, y=620)
+paso4a = tk.Label(ventana, text="Paso 3b: Elegir un rango de números RGB para\n umbralizar la imagen a color")
+paso4a.place(x=750, y=10)
+paso4b = tk.Label(ventana, text="")
 paso4b.place(x=750, y=700)
-paso5 = tk.Label(ventana, text="Paso 5: Analizar las manchas en la imagen umbralizada")
-paso5.place(x=1100, y=20)
+paso5 = tk.Label(ventana, text="Paso 4: Analizar las manchas en la imagen umbralizada")
+paso5.place(x=1020, y=20)
 
 ventana.mainloop()

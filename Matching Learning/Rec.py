@@ -5,13 +5,13 @@ import json
 import importlib
 import threading
 import time
+from datetime import datetime
 import tkinter as tk
 from tkinter import ttk
 
 os.environ.setdefault("OPENCV_LOG_LEVEL", "ERROR")
 import cv2
 from PIL import Image, ImageTk
-
 
 class InterfazCuatroCamaras:
     def __init__(self, raiz):
@@ -27,6 +27,7 @@ class InterfazCuatroCamaras:
         self.variables_selector = []
         self.comboboxes = []
         self.opcion_a_indice = {}
+        self.indices_activos = set()
         self.indices_asignados = [None, None, None, None]
         self.version_slot = [0, 0, 0, 0]
         self.cargando_slot = [False, False, False, False]
@@ -37,6 +38,7 @@ class InterfazCuatroCamaras:
         self.conteo_fotos = 0
         self.intervalo_segundos = 3.0
         self.pausa_secuencial_segundos = 0.6
+        self.ruta_sesion = None
 
         self._construir_ui()
         self._bloquear_tamano_inicial()
@@ -144,9 +146,37 @@ class InterfazCuatroCamaras:
         self._leer_intervalo()
         self.capturando = True
         self.ultimo_disparo = 0.0
+        self.conteo_fotos = 0
+        self.ruta_sesion = None
 
     def detener_captura(self):
         self.capturando = False
+
+    def _asegurar_sesion_captura(self):
+        if self.ruta_sesion is None:
+            marca_tiempo = datetime.now().strftime("%Y%m%d_%H%M%S")
+            self.ruta_sesion = os.path.join("capturas_intervalo", f"sesion_{marca_tiempo}")
+            os.makedirs(self.ruta_sesion, exist_ok=True)
+
+        return self.ruta_sesion
+
+    def _guardar_capturas_intervalo(self, frames_por_slot):
+        carpeta_sesion = self._asegurar_sesion_captura()
+        guardadas = 0
+
+        for slot, frame in enumerate(frames_por_slot):
+            if frame is None:
+                continue
+
+            carpeta_camara = os.path.join(carpeta_sesion, f"camara_{slot + 1}")
+            os.makedirs(carpeta_camara, exist_ok=True)
+
+            nombre = f"foto_{self.conteo_fotos + 1:05d}_cam{slot + 1}.jpg"
+            ruta_salida = os.path.join(carpeta_camara, nombre)
+            if cv2.imwrite(ruta_salida, frame):
+                guardadas += 1
+
+        return guardadas
 
     def _abrir_camara(self, indice):
         # Para indices de Windows, DSHOW suele responder mas rapido y evita pruebas extra.
@@ -319,6 +349,8 @@ class InterfazCuatroCamaras:
         opciones = ["No asignada"]
 
         for dispositivo in self.dispositivos:
+            if dispositivo["indice"] not in self.indices_activos:
+                continue
             opcion = self._armar_opcion(dispositivo)
             opciones.append(opcion)
             self.opcion_a_indice[opcion] = dispositivo["indice"]
@@ -417,6 +449,7 @@ class InterfazCuatroCamaras:
         for slot in range(4):
             self._asignar_camara_slot(slot, None)
 
+        self.indices_activos.clear()
         self.dispositivos = self._detectar_dispositivos()
         self._actualizar_selectores()
 
@@ -456,7 +489,12 @@ class InterfazCuatroCamaras:
 
                 time.sleep(self.pausa_secuencial_segundos)
 
-            self.raiz.after(0, lambda: self._encender_slots_secuencial(indices_detectados))
+            def finalizar_deteccion():
+                self.indices_activos = set(indices_detectados)
+                self._actualizar_selectores()
+                self._encender_slots_secuencial(indices_detectados)
+
+            self.raiz.after(0, finalizar_deteccion)
 
         threading.Thread(target=tarea_deteccion_secuencial, daemon=True).start()
 
@@ -465,6 +503,7 @@ class InterfazCuatroCamaras:
 
     def _actualizar_vistas(self):
         conectadas = 0
+        frames_disponibles = [None, None, None, None]
 
         for i, camara in enumerate(self.capturas):
             ok, frame = (
@@ -476,6 +515,7 @@ class InterfazCuatroCamaras:
             if ok and frame is not None:
                 conectadas += 1
                 frame = cv2.resize(frame, (self.ancho_cuadro, self.alto_cuadro))
+                frames_disponibles[i] = frame.copy()
                 frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
                 imagen = Image.fromarray(frame_rgb)
                 imagen_tk = ImageTk.PhotoImage(imagen)
@@ -499,8 +539,10 @@ class InterfazCuatroCamaras:
         if self.capturando:
             ahora = time.time()
             if ahora - self.ultimo_disparo >= self.intervalo_segundos:
-                self.conteo_fotos += 1
                 self.ultimo_disparo = ahora
+                guardadas = self._guardar_capturas_intervalo(frames_disponibles)
+                if guardadas > 0:
+                    self.conteo_fotos += 1
 
         estado_captura = "activa" if self.capturando else "detenida"
         asignadas = [i for i in self.indices_asignados if i is not None]

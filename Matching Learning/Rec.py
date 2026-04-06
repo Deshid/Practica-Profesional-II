@@ -5,7 +5,6 @@ import json
 import importlib
 import threading
 import time
-from datetime import datetime
 import tkinter as tk
 from tkinter import ttk
 
@@ -46,9 +45,17 @@ class InterfazCuatroCamaras:
         self.capturando = False
         self.ultimo_disparo = 0.0
         self.conteo_fotos = 0
+        self.ultimo_id_disparo = 0
         self.intervalo_segundos = 3.0
         self.pausa_secuencial_segundos = 0.6
-        self.ruta_sesion = None
+        self.ruta_objeto = None
+        self.opciones_etiqueta_objeto = [
+            "objeto_a",
+            "objeto_b",
+            "objeto_c",
+            "objeto_d",
+            "fondo_vacio",
+        ]
         self.variable_mensaje_rojo = tk.StringVar(value="")
 
         self._construir_ui()
@@ -163,10 +170,21 @@ class InterfazCuatroCamaras:
         fila_intervalo = ttk.Frame(controles)
         fila_intervalo.grid(row=0, column=0, sticky="w")
 
-        ttk.Label(fila_intervalo, text="Intervalo entre fotos (s):").grid(row=0, column=0)
+        ttk.Label(fila_intervalo, text="Etiqueta objeto:").grid(row=0, column=0)
+        self.variable_objeto = tk.StringVar(value=self.opciones_etiqueta_objeto[0])
+        self.combobox_etiqueta_objeto = ttk.Combobox(
+            fila_intervalo,
+            textvariable=self.variable_objeto,
+            values=self.opciones_etiqueta_objeto,
+            state="readonly",
+            width=16,
+        )
+        self.combobox_etiqueta_objeto.grid(row=0, column=1, padx=(6, 10))
+
+        ttk.Label(fila_intervalo, text="Intervalo entre fotos (s):").grid(row=0, column=2)
         self.variable_intervalo = tk.StringVar(value="3")
         ttk.Entry(fila_intervalo, textvariable=self.variable_intervalo, width=6).grid(
-            row=0, column=1, padx=(6, 0)
+            row=0, column=3, padx=(6, 0)
         )
 
         botones = ttk.Frame(controles)
@@ -220,10 +238,19 @@ class InterfazCuatroCamaras:
 
     def iniciar_captura(self):
         self._leer_intervalo()
+        etiqueta_objeto = self._normalizar_etiqueta_objeto(self.variable_objeto.get())
+        if not etiqueta_objeto:
+            self.variable_mensaje_rojo.set(
+                "Define una etiqueta de objeto valida (ejemplo: objeto_a o fondo_vacio)."
+            )
+            self.boton_copiar_ruta.grid_remove()
+            return
+
         self.capturando = True
         self.ultimo_disparo = 0.0
         self.conteo_fotos = 0
-        self.ruta_sesion = None
+        self.ruta_objeto = self._asegurar_carpeta_objeto(etiqueta_objeto)
+        self.ultimo_id_disparo = self._obtener_max_id_disparo(self.ruta_objeto)
         self.variable_mensaje_rojo.set("")
         self.boton_copiar_ruta.grid_remove()
         for variable_mensaje in self.variables_mensaje_slot:
@@ -231,41 +258,68 @@ class InterfazCuatroCamaras:
 
     def detener_captura(self):
         self.capturando = False
-        if self.ruta_sesion:
+        if self.ruta_objeto:
             self.variable_mensaje_rojo.set(
-                f"Captura detenida. Sesion guardada en: {self.ruta_sesion}"
+                f"Captura detenida. Dataset guardado en: {self.ruta_objeto}"
             )
             self.boton_copiar_ruta.grid()
         else:
             self.variable_mensaje_rojo.set(
-                "Captura detenida. No se guardaron imagenes en esta sesion."
+                "Captura detenida. No se guardaron imagenes en este dataset."
             )
             self.boton_copiar_ruta.grid_remove()
 
     def copiar_ruta_sesion(self):
-        if self.ruta_sesion:
+        if self.ruta_objeto:
             self.raiz.clipboard_clear()
-            self.raiz.clipboard_append(self.ruta_sesion)
+            self.raiz.clipboard_append(self.ruta_objeto)
             self.variable_mensaje_rojo.set(
-                f"Ruta copiada al portapapeles: {self.ruta_sesion}"
+                f"Ruta copiada al portapapeles: {self.ruta_objeto}"
             )
         else:
             self.variable_mensaje_rojo.set(
-                "No hay ruta de sesion para copiar aun."
+                "No hay ruta de dataset para copiar aun."
             )
 
-    def _asegurar_sesion_captura(self):
-        if self.ruta_sesion is None:
-            marca_tiempo = datetime.now().strftime("%d-%m-%Y_%H-%M-%S")
-            base_script = os.path.dirname(os.path.abspath(__file__))
-            carpeta_capturas = os.path.join(base_script, "capturas")
-            self.ruta_sesion = os.path.join(carpeta_capturas, f"sesion_{marca_tiempo}")
-            os.makedirs(self.ruta_sesion, exist_ok=True)
+    def _normalizar_etiqueta_objeto(self, etiqueta):
+        etiqueta_limpia = (etiqueta or "").strip().lower()
+        etiqueta_limpia = re.sub(r"\s+", "_", etiqueta_limpia)
+        etiqueta_limpia = re.sub(r"[^a-z0-9_-]", "", etiqueta_limpia)
+        return etiqueta_limpia
 
-        return self.ruta_sesion
+    def _asegurar_carpeta_objeto(self, etiqueta_objeto):
+        base_script = os.path.dirname(os.path.abspath(__file__))
+        carpeta_dataset = os.path.join(base_script, "dataset")
+        os.makedirs(carpeta_dataset, exist_ok=True)
+
+        # Carpeta para clase negativa recomendada en matching learning.
+        os.makedirs(os.path.join(carpeta_dataset, "fondo_vacio"), exist_ok=True)
+
+        ruta_objeto = os.path.join(carpeta_dataset, etiqueta_objeto)
+        os.makedirs(ruta_objeto, exist_ok=True)
+        return ruta_objeto
+
+    def _obtener_max_id_disparo(self, ruta_objeto):
+        maximo = 0
+        patron = re.compile(r"^(\d+)_c\d+\.jpg$", re.IGNORECASE)
+
+        try:
+            nombres = os.listdir(ruta_objeto)
+        except OSError:
+            return 0
+
+        for nombre in nombres:
+            coincidencia = patron.match(nombre)
+            if coincidencia:
+                maximo = max(maximo, int(coincidencia.group(1)))
+
+        return maximo
 
     def _guardar_capturas_intervalo(self, frames_por_slot):
-        carpeta_sesion = self._asegurar_sesion_captura()
+        if not self.ruta_objeto:
+            return 0, ["sin_frame", "sin_frame", "sin_frame", "sin_frame"]
+
+        id_disparo = self.ultimo_id_disparo + 1
         guardadas = 0
         estado_por_slot = ["sin_frame", "sin_frame", "sin_frame", "sin_frame"]
 
@@ -273,16 +327,16 @@ class InterfazCuatroCamaras:
             if frame is None:
                 continue
 
-            carpeta_camara = os.path.join(carpeta_sesion, f"camara_{slot + 1}")
-            os.makedirs(carpeta_camara, exist_ok=True)
-
-            nombre = f"foto_{self.conteo_fotos + 1:05d}_cam{slot + 1}.jpg"
-            ruta_salida = os.path.join(carpeta_camara, nombre)
+            nombre = f"{id_disparo:03d}_c{slot + 1}.jpg"
+            ruta_salida = os.path.join(self.ruta_objeto, nombre)
             if cv2.imwrite(ruta_salida, frame):
                 guardadas += 1
                 estado_por_slot[slot] = "capturado"
             else:
                 estado_por_slot[slot] = "error_guardado"
+
+        if guardadas > 0:
+            self.ultimo_id_disparo = id_disparo
 
         return guardadas, estado_por_slot
 

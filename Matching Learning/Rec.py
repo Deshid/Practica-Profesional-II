@@ -18,9 +18,18 @@ class InterfazCuatroCamaras:
         self.raiz = raiz
         self.raiz.title("UI - 4 Camaras")
         self.raiz.protocol("WM_DELETE_WINDOW", self.cerrar)
+        self.raiz.resizable(True, True)
+        self.raiz.bind("<F11>", self._alternar_pantalla_completa)
+        self.raiz.bind("<Escape>", self._salir_pantalla_completa)
+        try:
+            self.raiz.state("zoomed")
+        except tk.TclError:
+            self.raiz.geometry(
+                f"{self.raiz.winfo_screenwidth()}x{self.raiz.winfo_screenheight()}+0+0"
+            )
 
-        self.ancho_cuadro = 311
-        self.alto_cuadro = 241
+        self.ancho_cuadro = 300
+        self.alto_cuadro = 220
 
         self.capturas = [None, None, None, None]
         self.dispositivos = []
@@ -32,6 +41,7 @@ class InterfazCuatroCamaras:
         self.version_slot = [0, 0, 0, 0]
         self.cargando_slot = [False, False, False, False]
         self.etiquetas_video = []
+        self.variables_mensaje_slot = []
         self.imagen_negra_tk = None
         self.capturando = False
         self.ultimo_disparo = 0.0
@@ -39,9 +49,10 @@ class InterfazCuatroCamaras:
         self.intervalo_segundos = 3.0
         self.pausa_secuencial_segundos = 0.6
         self.ruta_sesion = None
+        self.variable_mensaje_rojo = tk.StringVar(value="")
 
         self._construir_ui()
-        self._bloquear_tamano_inicial()
+        self.raiz.bind("<Configure>", self._al_redimensionar)
         self.detectar_camaras()
         self._actualizar_vistas()
 
@@ -49,16 +60,24 @@ class InterfazCuatroCamaras:
         self.raiz.columnconfigure(0, weight=1)
         self.raiz.rowconfigure(0, weight=1)
 
-        contenedor = ttk.Frame(self.raiz, padding=10)
+        contenedor = ttk.Frame(self.raiz, padding=8)
         contenedor.grid(row=0, column=0, sticky="nsew")
         contenedor.columnconfigure(0, weight=1)
-        contenedor.rowconfigure(0, weight=1)
+        contenedor.rowconfigure(1, weight=1)
+
+        ttk.Label(
+            contenedor,
+            text="Captura de datos para matching learning",
+            font=("Segoe UI", 16, "bold"),
+            anchor="center",
+            justify="center",
+        ).grid(row=0, column=0, sticky="ew", pady=(0, 6))
 
         imagen_negra = Image.new("RGB", (self.ancho_cuadro, self.alto_cuadro), "black")
         self.imagen_negra_tk = ImageTk.PhotoImage(imagen_negra)
 
         cuadricula = ttk.Frame(contenedor)
-        cuadricula.grid(row=0, column=0, sticky="nsew")
+        cuadricula.grid(row=1, column=0, sticky="nsew")
         for fila in range(2):
             cuadricula.rowconfigure(fila, weight=1)
         for columna in range(2):
@@ -66,7 +85,7 @@ class InterfazCuatroCamaras:
 
         for i in range(4):
             panel = ttk.LabelFrame(cuadricula, text=f"Camara {i + 1}")
-            panel.grid(row=i // 2, column=i % 2, padx=6, pady=6, sticky="nsew")
+            panel.grid(row=i // 2, column=i % 2, padx=4, pady=4, sticky="nsew")
 
             fila_selector = ttk.Frame(panel)
             fila_selector.pack(fill="x", padx=4, pady=(4, 0))
@@ -97,8 +116,48 @@ class InterfazCuatroCamaras:
             vista.pack(padx=4, pady=4)
             self.etiquetas_video.append(vista)
 
-        controles = ttk.Frame(contenedor, padding=(0, 8, 0, 0))
-        controles.grid(row=1, column=0, sticky="ew")
+            variable_mensaje = tk.StringVar(value="")
+            etiqueta_mensaje = tk.Label(
+                panel,
+                textvariable=variable_mensaje,
+                font=("Segoe UI", 10, "bold"),
+                fg="#C00000",
+                bg=self.raiz.cget("bg"),
+                anchor="center",
+                justify="center",
+                pady=2,
+            )
+            etiqueta_mensaje.pack(fill="x", padx=4, pady=(0, 4))
+            self.variables_mensaje_slot.append(variable_mensaje)
+
+        self.fila_ruta = ttk.Frame(contenedor)
+        self.fila_ruta.grid(row=2, column=0, sticky="ew", pady=(2, 0))
+        self.fila_ruta.columnconfigure(0, weight=1)
+
+        self.etiqueta_mensaje_rojo = tk.Label(
+            self.fila_ruta,
+            textvariable=self.variable_mensaje_rojo,
+            font=("Segoe UI", 11, "bold"),
+            fg="#C00000",
+            bg=self.raiz.cget("bg"),
+            anchor="w",
+            justify="left",
+            wraplength=640,
+            padx=4,
+            pady=2,
+        )
+        self.etiqueta_mensaje_rojo.grid(row=0, column=0, sticky="ew")
+
+        self.boton_copiar_ruta = ttk.Button(
+            self.fila_ruta,
+            text="Copiar ruta",
+            command=self.copiar_ruta_sesion,
+        )
+        self.boton_copiar_ruta.grid(row=0, column=1, padx=(8, 0), sticky="e")
+        self.boton_copiar_ruta.grid_remove()
+
+        controles = ttk.Frame(contenedor, padding=(0, 6, 0, 0))
+        controles.grid(row=3, column=0, sticky="ew")
         controles.columnconfigure(0, weight=1)
 
         fila_intervalo = ttk.Frame(controles)
@@ -123,17 +182,34 @@ class InterfazCuatroCamaras:
         ).grid(row=0, column=2, padx=(6, 0))
 
         self.variable_estado = tk.StringVar(value="Detectando camaras...")
-        ttk.Label(controles, textvariable=self.variable_estado, font=("Segoe UI", 11, "bold")).grid(
-            row=1, column=0, sticky="w", pady=(6, 0)
+        self.etiqueta_estado = tk.Label(
+            controles,
+            textvariable=self.variable_estado,
+            font=("Segoe UI", 12, "bold"),
+            bg="#111111",
+            fg="#FFFFFF",
+            anchor="w",
+            justify="left",
+            wraplength=640,
+            padx=8,
+            pady=6,
         )
+        self.etiqueta_estado.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(8, 0))
 
-    def _bloquear_tamano_inicial(self):
-        self.raiz.update_idletasks()
-        ancho = self.raiz.winfo_width()
-        alto = self.raiz.winfo_height()
-        self.raiz.minsize(ancho, alto)
-        self.raiz.maxsize(ancho, alto)
-        self.raiz.resizable(False, False)
+    def _al_redimensionar(self, _evento=None):
+        ancho_actual = max(400, self.raiz.winfo_width() - 40)
+        self.etiqueta_estado.configure(wraplength=ancho_actual)
+        self.etiqueta_mensaje_rojo.configure(wraplength=ancho_actual)
+
+    def _alternar_pantalla_completa(self, _evento=None):
+        estado_actual = self.raiz.state()
+        if estado_actual == "zoomed":
+            self.raiz.state("normal")
+        else:
+            self.raiz.state("zoomed")
+
+    def _salir_pantalla_completa(self, _evento=None):
+        self.raiz.state("normal")
 
     def _leer_intervalo(self):
         try:
@@ -148,14 +224,42 @@ class InterfazCuatroCamaras:
         self.ultimo_disparo = 0.0
         self.conteo_fotos = 0
         self.ruta_sesion = None
+        self.variable_mensaje_rojo.set("")
+        self.boton_copiar_ruta.grid_remove()
+        for variable_mensaje in self.variables_mensaje_slot:
+            variable_mensaje.set("")
 
     def detener_captura(self):
         self.capturando = False
+        if self.ruta_sesion:
+            self.variable_mensaje_rojo.set(
+                f"Captura detenida. Sesion guardada en: {self.ruta_sesion}"
+            )
+            self.boton_copiar_ruta.grid()
+        else:
+            self.variable_mensaje_rojo.set(
+                "Captura detenida. No se guardaron imagenes en esta sesion."
+            )
+            self.boton_copiar_ruta.grid_remove()
+
+    def copiar_ruta_sesion(self):
+        if self.ruta_sesion:
+            self.raiz.clipboard_clear()
+            self.raiz.clipboard_append(self.ruta_sesion)
+            self.variable_mensaje_rojo.set(
+                f"Ruta copiada al portapapeles: {self.ruta_sesion}"
+            )
+        else:
+            self.variable_mensaje_rojo.set(
+                "No hay ruta de sesion para copiar aun."
+            )
 
     def _asegurar_sesion_captura(self):
         if self.ruta_sesion is None:
-            marca_tiempo = datetime.now().strftime("%Y%m%d_%H%M%S")
-            self.ruta_sesion = os.path.join("capturas_intervalo", f"sesion_{marca_tiempo}")
+            marca_tiempo = datetime.now().strftime("%d-%m-%Y_%H-%M-%S")
+            base_script = os.path.dirname(os.path.abspath(__file__))
+            carpeta_capturas = os.path.join(base_script, "capturas")
+            self.ruta_sesion = os.path.join(carpeta_capturas, f"sesion_{marca_tiempo}")
             os.makedirs(self.ruta_sesion, exist_ok=True)
 
         return self.ruta_sesion
@@ -163,6 +267,7 @@ class InterfazCuatroCamaras:
     def _guardar_capturas_intervalo(self, frames_por_slot):
         carpeta_sesion = self._asegurar_sesion_captura()
         guardadas = 0
+        estado_por_slot = ["sin_frame", "sin_frame", "sin_frame", "sin_frame"]
 
         for slot, frame in enumerate(frames_por_slot):
             if frame is None:
@@ -175,8 +280,11 @@ class InterfazCuatroCamaras:
             ruta_salida = os.path.join(carpeta_camara, nombre)
             if cv2.imwrite(ruta_salida, frame):
                 guardadas += 1
+                estado_por_slot[slot] = "capturado"
+            else:
+                estado_por_slot[slot] = "error_guardado"
 
-        return guardadas
+        return guardadas, estado_por_slot
 
     def _abrir_camara(self, indice):
         # Para indices de Windows, DSHOW suele responder mas rapido y evita pruebas extra.
@@ -347,11 +455,25 @@ class InterfazCuatroCamaras:
     def _actualizar_selectores(self):
         self.opcion_a_indice = {}
         opciones = ["No asignada"]
+        uso_por_indice = {}
+
+        for slot, indice_asignado in enumerate(self.indices_asignados):
+            if indice_asignado is None:
+                continue
+            uso_por_indice.setdefault(indice_asignado, []).append(slot + 1)
 
         for dispositivo in self.dispositivos:
             if dispositivo["indice"] not in self.indices_activos:
                 continue
-            opcion = self._armar_opcion(dispositivo)
+
+            opcion_base = self._armar_opcion(dispositivo)
+            slots_en_uso = uso_por_indice.get(dispositivo["indice"], [])
+            if slots_en_uso:
+                slots_texto = ", ".join(str(s) for s in slots_en_uso)
+                opcion = f"{opcion_base} [EN USO en camara {slots_texto}]"
+            else:
+                opcion = opcion_base
+
             opciones.append(opcion)
             self.opcion_a_indice[opcion] = dispositivo["indice"]
 
@@ -377,6 +499,7 @@ class InterfazCuatroCamaras:
         self.capturas[slot] = None
         self.indices_asignados[slot] = None
         self.cargando_slot[slot] = False
+        self._actualizar_selectores()
 
         if indice is None:
             return
@@ -396,6 +519,7 @@ class InterfazCuatroCamaras:
                 if camara is not None and camara.isOpened():
                     self.capturas[slot_local] = camara
                     self.indices_asignados[slot_local] = indice_local
+                    self._actualizar_selectores()
                 else:
                     self.variable_estado.set(f"No se pudo abrir la camara del indice {indice_local}")
 
@@ -540,9 +664,20 @@ class InterfazCuatroCamaras:
             ahora = time.time()
             if ahora - self.ultimo_disparo >= self.intervalo_segundos:
                 self.ultimo_disparo = ahora
-                guardadas = self._guardar_capturas_intervalo(frames_disponibles)
+                guardadas, _estado_por_slot = self._guardar_capturas_intervalo(frames_disponibles)
                 if guardadas > 0:
                     self.conteo_fotos += 1
+
+            for i in range(4):
+                if self.indices_asignados[i] is None:
+                    self.variables_mensaje_slot[i].set("")
+                else:
+                    self.variables_mensaje_slot[i].set(
+                        f"capturando | fotos {self.conteo_fotos}"
+                    )
+        else:
+            for i in range(4):
+                self.variables_mensaje_slot[i].set("")
 
         estado_captura = "activa" if self.capturando else "detenida"
         asignadas = [i for i in self.indices_asignados if i is not None]

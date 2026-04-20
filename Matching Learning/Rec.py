@@ -5,11 +5,15 @@ import json
 import importlib
 import threading
 import time
+from pathlib import Path
 import tkinter as tk
-from tkinter import ttk
+from tkinter import filedialog, messagebox, ttk
 
 os.environ.setdefault("OPENCV_LOG_LEVEL", "ERROR")
+os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "2")
+os.environ.setdefault("TF_ENABLE_ONEDNN_OPTS", "0")
 import cv2
+import numpy as np
 from PIL import Image, ImageTk
 
 class InterfazCuatroCamaras:
@@ -57,6 +61,17 @@ class InterfazCuatroCamaras:
             "fondo_vacio",
         ]
         self.variable_mensaje_rojo = tk.StringVar(value="")
+        self.indice_camara_ia = tk.StringVar(value="0")
+        self.ruta_modelo_ia = None
+        self.variable_modelo_ia = tk.StringVar(value="Sin modelo seleccionado")
+        self.prediccion_en_curso = False
+        self.detener_prediccion_evento = threading.Event()
+        self.notebook_vistas = None
+        self.tab_camaras = None
+        self.tab_prediccion = None
+        self.etiqueta_prediccion = None
+        self.imagen_prediccion_tk = None
+        self.camara_prediccion = None
 
         self._construir_ui()
         self.raiz.bind("<Configure>", self._al_redimensionar)
@@ -83,8 +98,16 @@ class InterfazCuatroCamaras:
         imagen_negra = Image.new("RGB", (self.ancho_cuadro, self.alto_cuadro), "black")
         self.imagen_negra_tk = ImageTk.PhotoImage(imagen_negra)
 
-        cuadricula = ttk.Frame(contenedor)
-        cuadricula.grid(row=1, column=0, sticky="nsew")
+        self.notebook_vistas = ttk.Notebook(contenedor)
+        self.notebook_vistas.grid(row=1, column=0, sticky="nsew")
+
+        self.tab_camaras = ttk.Frame(self.notebook_vistas)
+        self.tab_prediccion = ttk.Frame(self.notebook_vistas)
+        self.notebook_vistas.add(self.tab_camaras, text="Camaras")
+        self.notebook_vistas.add(self.tab_prediccion, text="Prediccion IA")
+
+        cuadricula = ttk.Frame(self.tab_camaras)
+        cuadricula.pack(fill="both", expand=True)
         for fila in range(2):
             cuadricula.rowconfigure(fila, weight=1)
         for columna in range(2):
@@ -136,6 +159,50 @@ class InterfazCuatroCamaras:
             )
             etiqueta_mensaje.pack(fill="x", padx=4, pady=(0, 4))
             self.variables_mensaje_slot.append(variable_mensaje)
+
+        panel_prediccion = ttk.Frame(self.tab_prediccion, padding=8)
+        panel_prediccion.pack(fill="both", expand=True)
+
+        fila_controles_pred = ttk.Frame(panel_prediccion)
+        fila_controles_pred.pack(fill="x", pady=(0, 8))
+        ttk.Button(
+            fila_controles_pred,
+            text="Seleccionar modelo .h5",
+            command=self.seleccionar_modelo_prediccion,
+        ).pack(side="left")
+        ttk.Label(
+            fila_controles_pred,
+            textvariable=self.variable_modelo_ia,
+            anchor="w",
+            justify="left",
+        ).pack(side="left", padx=(8, 0), fill="x", expand=True)
+
+        fila_controles_pred2 = ttk.Frame(panel_prediccion)
+        fila_controles_pred2.pack(fill="x", pady=(0, 8))
+        ttk.Label(fila_controles_pred2, text="Camara IA idx:").pack(side="left")
+        ttk.Entry(fila_controles_pred2, textvariable=self.indice_camara_ia, width=4).pack(
+            side="left", padx=(6, 12)
+        )
+        ttk.Button(
+            fila_controles_pred2,
+            text="Iniciar deteccion",
+            command=self.iniciar_prediccion_tiempo_real,
+        ).pack(side="left")
+        ttk.Button(
+            fila_controles_pred2,
+            text="Detener deteccion",
+            command=self.detener_prediccion_tiempo_real,
+        ).pack(side="left", padx=(8, 0))
+
+        self.etiqueta_prediccion = tk.Label(
+            panel_prediccion,
+            text="Selecciona un modelo .h5 y luego pulsa 'Iniciar deteccion'.",
+            bg="black",
+            fg="white",
+            font=("Segoe UI", 12, "bold"),
+            anchor="center",
+        )
+        self.etiqueta_prediccion.pack(fill="both", expand=True)
 
         self.fila_ruta = ttk.Frame(contenedor)
         self.fila_ruta.grid(row=2, column=0, sticky="ew", pady=(2, 0))
@@ -679,6 +746,163 @@ class InterfazCuatroCamaras:
     def _inicializar_camaras(self):
         self.detectar_camaras()
 
+    def _seleccionar_modelo_h5(self):
+        base_dir = Path(__file__).resolve().parent
+        ruta_default = base_dir / "modelos" / "modelo_buho_v1.h5"
+        ruta_inicial = ruta_default if ruta_default.exists() else base_dir
+
+        ruta_modelo = filedialog.askopenfilename(
+            title="Selecciona modelo Keras (.h5)",
+            initialdir=str(ruta_inicial),
+            initialfile="modelo_buho_v1.h5",
+            filetypes=[("Modelos Keras", "*.h5"), ("Todos los archivos", "*.*")],
+        )
+
+        return Path(ruta_modelo) if ruta_modelo else None
+
+    def seleccionar_modelo_prediccion(self):
+        ruta_modelo = self._seleccionar_modelo_h5()
+        if not ruta_modelo:
+            return
+
+        self.ruta_modelo_ia = ruta_modelo
+        self.variable_modelo_ia.set(str(ruta_modelo.name))
+        self.variable_mensaje_rojo.set(f"Modelo seleccionado: {ruta_modelo.name}")
+
+    def iniciar_prediccion_tiempo_real(self):
+        if self.prediccion_en_curso:
+            if self.notebook_vistas is not None and self.tab_prediccion is not None:
+                self.notebook_vistas.select(self.tab_prediccion)
+            self.variable_mensaje_rojo.set("La prediccion en tiempo real ya esta ejecutandose.")
+            return
+
+        ruta_modelo = self.ruta_modelo_ia
+        if not ruta_modelo:
+            self.variable_mensaje_rojo.set("Selecciona un modelo .h5 en la pestana de Prediccion IA.")
+            return
+
+        try:
+            indice_camara = int(self.indice_camara_ia.get().strip())
+        except ValueError:
+            indice_camara = 0
+
+        if self.notebook_vistas is not None and self.tab_prediccion is not None:
+            self.notebook_vistas.select(self.tab_prediccion)
+        if self.etiqueta_prediccion is not None:
+            self.etiqueta_prediccion.configure(text="Iniciando camara...", image=self.imagen_negra_tk)
+        self.prediccion_en_curso = True
+        self.detener_prediccion_evento.clear()
+        self.variable_mensaje_rojo.set(f"Iniciando prediccion IA con: {ruta_modelo.name}")
+
+        threading.Thread(
+            target=self._ejecutar_prediccion_tiempo_real,
+            args=(ruta_modelo, indice_camara),
+            daemon=True,
+        ).start()
+
+    def detener_prediccion_tiempo_real(self):
+        if not self.prediccion_en_curso and self.camara_prediccion is None:
+            return
+
+        self.detener_prediccion_evento.set()
+
+        if self.camara_prediccion is not None and self.camara_prediccion.isOpened():
+            self.camara_prediccion.release()
+        self.camara_prediccion = None
+
+        if self.etiqueta_prediccion is not None:
+            self.etiqueta_prediccion.configure(
+                image=self.imagen_negra_tk,
+                text="Prediccion detenida.",
+            )
+            self.etiqueta_prediccion.imagen_tk = self.imagen_negra_tk
+
+        if self.notebook_vistas is not None and self.tab_camaras is not None:
+            self.notebook_vistas.select(self.tab_camaras)
+
+        self.imagen_prediccion_tk = None
+        self.prediccion_en_curso = False
+        self.variable_mensaje_rojo.set("Prediccion IA detenida.")
+
+    def _actualizar_frame_prediccion_ui(self, frame_rgb):
+        if self.etiqueta_prediccion is None:
+            return
+
+        imagen = Image.fromarray(frame_rgb)
+        imagen_tk = ImageTk.PhotoImage(imagen)
+        self.imagen_prediccion_tk = imagen_tk
+        self.etiqueta_prediccion.configure(image=imagen_tk, text="")
+        self.etiqueta_prediccion.imagen_tk = imagen_tk
+
+    def _ejecutar_prediccion_tiempo_real(self, ruta_modelo, indice_camara):
+        try:
+            from tensorflow.keras.models import load_model
+
+            modelo = load_model(str(ruta_modelo), compile=False)
+            self.camara_prediccion = cv2.VideoCapture(indice_camara, cv2.CAP_DSHOW)
+            if not self.camara_prediccion.isOpened():
+                raise RuntimeError(f"No se pudo abrir la camara en indice {indice_camara}.")
+
+            while not self.detener_prediccion_evento.is_set():
+                ok, frame = self.camara_prediccion.read()
+                if not ok or frame is None:
+                    continue
+
+                entrada = cv2.resize(frame, (224, 224))
+                entrada = entrada.astype(np.float32) / 255.0
+                entrada = np.expand_dims(entrada, axis=0)
+
+                prediccion = float(modelo.predict(entrada, verbose=0)[0][0])
+                if prediccion > 0.5:
+                    texto = "BÚHO DETECTADO"
+                    color = (0, 255, 0)
+                else:
+                    texto = "FONDO VACÍO"
+                    color = (0, 0, 255)
+
+                cv2.putText(
+                    frame,
+                    texto,
+                    (20, 40),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    1.0,
+                    color,
+                    2,
+                    cv2.LINE_AA,
+                )
+                cv2.putText(
+                    frame,
+                    f"score: {prediccion:.3f}",
+                    (20, 75),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.7,
+                    color,
+                    2,
+                    cv2.LINE_AA,
+                )
+
+                frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                self.raiz.after(0, self._actualizar_frame_prediccion_ui, frame_rgb)
+
+            if self.detener_prediccion_evento.is_set():
+                self.raiz.after(0, lambda: self.variable_mensaje_rojo.set("Prediccion IA detenida."))
+            else:
+                self.raiz.after(0, lambda: self.variable_mensaje_rojo.set("Prediccion IA finalizada."))
+        except Exception as exc:
+            mensaje_error = str(exc)
+            self.raiz.after(
+                0,
+                lambda m=mensaje_error: messagebox.showerror(
+                    "Error en prediccion IA",
+                    m,
+                ),
+            )
+        finally:
+            if self.camara_prediccion is not None and self.camara_prediccion.isOpened():
+                self.camara_prediccion.release()
+            self.camara_prediccion = None
+            self.prediccion_en_curso = False
+
     def _actualizar_vistas(self):
         conectadas = 0
         frames_disponibles = [None, None, None, None]
@@ -742,6 +966,9 @@ class InterfazCuatroCamaras:
         self.raiz.after(33, self._actualizar_vistas)
 
     def cerrar(self):
+        if self.prediccion_en_curso:
+            self.detener_prediccion_tiempo_real()
+
         for camara in self.capturas:
             if camara is not None and camara.isOpened():
                 camara.release()

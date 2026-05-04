@@ -15,6 +15,7 @@ os.environ.setdefault("TF_ENABLE_ONEDNN_OPTS", "0")
 import cv2
 import numpy as np
 from PIL import Image, ImageTk
+import tensorflow as tf
 
 class InterfazCuatroCamaras:
     def __init__(self, raiz):
@@ -72,15 +73,55 @@ class InterfazCuatroCamaras:
         self.etiqueta_prediccion = None
         self.imagen_prediccion_tk = None
         self.camara_prediccion = None
+        self.camaras_prediccion = [None, None, None, None]
+        self.etiquetas_prediccion = []
+        self.imagenes_prediccion_tk = [None, None, None, None]
+        self.cuadricula_prediccion = None
+        self.variables_selector_prediccion = []
+        self.comboboxes_prediccion = []
+        self.indices_asignados_prediccion = [None, None, None, None]
+        self.actualizando_preview_prediccion = False
+        self.modelo_prediccion_cargado = None
 
         self._construir_ui()
         self.raiz.bind("<Configure>", self._al_redimensionar)
         self.detectar_camaras()
         self._actualizar_vistas()
+        self.actualizando_preview_prediccion = True
+        threading.Thread(target=self._actualizar_preview_prediccion, daemon=True).start()
 
     def _construir_ui(self):
         self.raiz.columnconfigure(0, weight=1)
         self.raiz.rowconfigure(0, weight=1)
+        
+        # Configurar tema oscuro
+        self.raiz.configure(bg="#1e1e1e")
+        estilo = ttk.Style()
+        estilo.theme_use("clam")
+        
+        # Colores oscuros para el tema
+        colores_oscuros = {
+            "bg": "#1e1e1e",
+            "fg": "#e0e0e0",
+            "fieldbg": "#2d2d2d",
+            "fieldtext": "#ffffff",
+            "activecolor": "#404040",
+        }
+        
+        # Configurar colores para Frame
+        estilo.configure("TFrame", background="#1e1e1e", foreground="#e0e0e0")
+        estilo.configure("TLabelFrame", background="#1e1e1e", foreground="#ffffff")
+        estilo.configure("Dark.TLabelframe", background="#1e1e1e", foreground="#ffffff", relief="flat")
+        estilo.configure("Dark.TLabelframe.Label", background="#1e1e1e", foreground="#ffffff")
+        estilo.configure("TLabel", background="#1e1e1e", foreground="#ffffff")
+        estilo.configure("Dark.TLabel", background="#2d2d2d", foreground="#ffffff")
+        estilo.configure("TButton", background="#2d2d2d", foreground="#e0e0e0")
+        estilo.map("TButton", background=[("active", "#404040")])
+        estilo.configure("TCombobox", fieldbackground="#2d2d2d", background="#2d2d2d", foreground="#000000")
+        estilo.configure("TEntry", fieldbackground="#2d2d2d", background="#2d2d2d", foreground="#ffffff")
+        estilo.configure("TNotebook", background="#1e1e1e", borderwidth=0)
+        estilo.configure("TNotebook.Tab", background="#252525", foreground="#ffffff", padding=[20, 10])
+        estilo.map("TNotebook.Tab", background=[("selected", "#2d2d2d")])
 
         contenedor = ttk.Frame(self.raiz, padding=8)
         contenedor.grid(row=0, column=0, sticky="nsew")
@@ -114,12 +155,12 @@ class InterfazCuatroCamaras:
             cuadricula.columnconfigure(columna, weight=1)
 
         for i in range(4):
-            panel = ttk.LabelFrame(cuadricula, text=f"Camara {i + 1}")
+            panel = ttk.LabelFrame(cuadricula, text=f"Camara {i + 1}", style="Dark.TLabelframe")
             panel.grid(row=i // 2, column=i % 2, padx=4, pady=4, sticky="nsew")
 
             fila_selector = ttk.Frame(panel)
             fila_selector.pack(fill="x", padx=4, pady=(4, 0))
-            ttk.Label(fila_selector, text="Fuente:").pack(side="left")
+            tk.Label(fila_selector, text="Fuente:", bg="#2d2d2d", fg="#ffffff", font=("Segoe UI", 9)).pack(side="left")
 
             variable_selector = tk.StringVar(value="No asignada")
             combobox = ttk.Combobox(
@@ -139,7 +180,7 @@ class InterfazCuatroCamaras:
                 text=f"Camara {i + 1}\nSin senal",
                 image=self.imagen_negra_tk,
                 compound="center",
-                bg="black",
+                bg="#1e1e1e",
                 fg="white",
                 font=("Segoe UI", 12, "bold"),
             )
@@ -152,7 +193,7 @@ class InterfazCuatroCamaras:
                 textvariable=variable_mensaje,
                 font=("Segoe UI", 10, "bold"),
                 fg="#C00000",
-                bg=self.raiz.cget("bg"),
+                bg="#1e1e1e",
                 anchor="center",
                 justify="center",
                 pady=2,
@@ -170,39 +211,87 @@ class InterfazCuatroCamaras:
             text="Seleccionar modelo .h5",
             command=self.seleccionar_modelo_prediccion,
         ).pack(side="left")
-        ttk.Label(
+        tk.Label(
             fila_controles_pred,
             textvariable=self.variable_modelo_ia,
             anchor="w",
             justify="left",
+            bg="#2d2d2d",
+            fg="#ffffff",
+            font=("Segoe UI", 9),
         ).pack(side="left", padx=(8, 0), fill="x", expand=True)
 
-        fila_controles_pred2 = ttk.Frame(panel_prediccion)
-        fila_controles_pred2.pack(fill="x", pady=(0, 8))
-        ttk.Label(fila_controles_pred2, text="Camara IA idx:").pack(side="left")
-        ttk.Entry(fila_controles_pred2, textvariable=self.indice_camara_ia, width=4).pack(
-            side="left", padx=(6, 12)
-        )
+        botones_prediccion = ttk.Frame(fila_controles_pred)
+        botones_prediccion.pack(side="right")
         ttk.Button(
-            fila_controles_pred2,
+            botones_prediccion,
             text="Iniciar deteccion",
             command=self.iniciar_prediccion_tiempo_real,
         ).pack(side="left")
         ttk.Button(
-            fila_controles_pred2,
+            botones_prediccion,
             text="Detener deteccion",
             command=self.detener_prediccion_tiempo_real,
         ).pack(side="left", padx=(8, 0))
 
-        self.etiqueta_prediccion = tk.Label(
-            panel_prediccion,
-            text="Selecciona un modelo .h5 y luego pulsa 'Iniciar deteccion'.",
-            bg="black",
-            fg="white",
-            font=("Segoe UI", 12, "bold"),
-            anchor="center",
-        )
-        self.etiqueta_prediccion.pack(fill="both", expand=True)
+        # Cuadrícula para 4 cámaras de predicción
+        self.cuadricula_prediccion = ttk.Frame(panel_prediccion)
+        self.cuadricula_prediccion.pack(fill="both", expand=True, pady=(8, 0))
+        for fila in range(2):
+            self.cuadricula_prediccion.rowconfigure(fila, weight=1)
+        for columna in range(2):
+            self.cuadricula_prediccion.columnconfigure(columna, weight=1)
+
+        self.etiquetas_prediccion = []
+        self.imagenes_prediccion_tk = [None, None, None, None]
+        self.variables_selector_prediccion = []
+        self.comboboxes_prediccion = []
+        
+        for i in range(4):
+            panel = ttk.LabelFrame(self.cuadricula_prediccion, text=f"Camara {i + 1}", style="Dark.TLabelframe")
+            panel.grid(row=i // 2, column=i % 2, padx=4, pady=4, sticky="nsew")
+
+            fila_selector = ttk.Frame(panel)
+            fila_selector.pack(fill="x", padx=4, pady=(4, 0))
+            tk.Label(fila_selector, text="Fuente:", bg="#2d2d2d", fg="#ffffff", font=("Segoe UI", 9)).pack(side="left")
+
+            variable_selector = tk.StringVar(value="No asignada")
+            combobox = ttk.Combobox(
+                fila_selector,
+                textvariable=variable_selector,
+                values=["No asignada"],
+                state="readonly",
+                width=25,
+            )
+            combobox.pack(side="left", padx=(6, 0))
+            combobox.bind("<<ComboboxSelected>>", lambda _e, slot=i: self._al_cambiar_selector_prediccion(slot))
+            self.variables_selector_prediccion.append(variable_selector)
+            self.comboboxes_prediccion.append(combobox)
+
+            etiqueta_video = tk.Label(
+                panel,
+                text=f"Camara {i + 1}\nSin senal",
+                image=self.imagen_negra_tk,
+                compound="center",
+                bg="#1e1e1e",
+                fg="white",
+                font=("Segoe UI", 12, "bold"),
+            )
+            etiqueta_video.pack(padx=4, pady=4)
+            self.etiquetas_prediccion.append(etiqueta_video)
+
+            etiqueta_info = tk.Label(
+                panel,
+                text="",
+                font=("Segoe UI", 10, "bold"),
+                fg="#00AA00",
+                bg="#1e1e1e",
+                anchor="center",
+                justify="center",
+                pady=2,
+            )
+            etiqueta_info.pack(fill="x", padx=4, pady=(0, 4))
+            self.etiquetas_prediccion.append(etiqueta_info)
 
         self.fila_ruta = ttk.Frame(contenedor)
         self.fila_ruta.grid(row=2, column=0, sticky="ew", pady=(2, 0))
@@ -213,7 +302,7 @@ class InterfazCuatroCamaras:
             textvariable=self.variable_mensaje_rojo,
             font=("Segoe UI", 11, "bold"),
             fg="#C00000",
-            bg=self.raiz.cget("bg"),
+            bg="#1e1e1e",
             anchor="w",
             justify="left",
             wraplength=640,
@@ -237,7 +326,7 @@ class InterfazCuatroCamaras:
         fila_intervalo = ttk.Frame(controles)
         fila_intervalo.grid(row=0, column=0, sticky="w")
 
-        ttk.Label(fila_intervalo, text="Etiqueta objeto:").grid(row=0, column=0)
+        tk.Label(fila_intervalo, text="Etiqueta objeto:", bg="#2d2d2d", fg="#ffffff", font=("Segoe UI", 9)).grid(row=0, column=0)
         self.variable_objeto = tk.StringVar(value=self.opciones_etiqueta_objeto[0])
         self.combobox_etiqueta_objeto = ttk.Combobox(
             fila_intervalo,
@@ -248,7 +337,7 @@ class InterfazCuatroCamaras:
         )
         self.combobox_etiqueta_objeto.grid(row=0, column=1, padx=(6, 10))
 
-        ttk.Label(fila_intervalo, text="Intervalo entre fotos (s):").grid(row=0, column=2)
+        tk.Label(fila_intervalo, text="Intervalo entre fotos (s):", bg="#2d2d2d", fg="#ffffff", font=("Segoe UI", 9)).grid(row=0, column=2)
         self.variable_intervalo = tk.StringVar(value="3")
         ttk.Entry(fila_intervalo, textvariable=self.variable_intervalo, width=6).grid(
             row=0, column=3, padx=(6, 0)
@@ -271,7 +360,7 @@ class InterfazCuatroCamaras:
             controles,
             textvariable=self.variable_estado,
             font=("Segoe UI", 12, "bold"),
-            bg="#111111",
+            bg="#252525",
             fg="#FFFFFF",
             anchor="w",
             justify="left",
@@ -609,6 +698,19 @@ class InterfazCuatroCamaras:
                     "No asignada",
                 )
                 self.variables_selector[slot].set(texto)
+        
+        # Actualizar también los selectores de predicción
+        for slot in range(4):
+            self.comboboxes_prediccion[slot]["values"] = opciones
+            indice = self.indices_asignados_prediccion[slot]
+            if indice is None:
+                self.variables_selector_prediccion[slot].set("No asignada")
+            else:
+                texto = next(
+                    (o for o, i in self.opcion_a_indice.items() if i == indice),
+                    "No asignada",
+                )
+                self.variables_selector_prediccion[slot].set(texto)
 
     def _asignar_camara_slot(self, slot, indice):
         self.version_slot[slot] += 1
@@ -689,6 +791,15 @@ class InterfazCuatroCamaras:
 
         indice = self.opcion_a_indice.get(opcion)
         self._asignar_camara_slot(slot, indice)
+
+    def _al_cambiar_selector_prediccion(self, slot):
+        opcion = self.variables_selector_prediccion[slot].get()
+        if opcion == "No asignada":
+            self.indices_asignados_prediccion[slot] = None
+            return
+
+        indice = self.opcion_a_indice.get(opcion)
+        self.indices_asignados_prediccion[slot] = indice
 
     def detectar_camaras(self):
         for slot in range(4):
@@ -781,108 +892,231 @@ class InterfazCuatroCamaras:
             self.variable_mensaje_rojo.set("Selecciona un modelo .h5 en la pestana de Prediccion IA.")
             return
 
-        try:
-            indice_camara = int(self.indice_camara_ia.get().strip())
-        except ValueError:
-            indice_camara = 0
-
         if self.notebook_vistas is not None and self.tab_prediccion is not None:
             self.notebook_vistas.select(self.tab_prediccion)
-        if self.etiqueta_prediccion is not None:
-            self.etiqueta_prediccion.configure(text="Iniciando camara...", image=self.imagen_negra_tk)
-        self.prediccion_en_curso = True
-        self.detener_prediccion_evento.clear()
-        self.variable_mensaje_rojo.set(f"Iniciando prediccion IA con: {ruta_modelo.name}")
 
-        threading.Thread(
-            target=self._ejecutar_prediccion_tiempo_real,
-            args=(ruta_modelo, indice_camara),
-            daemon=True,
-        ).start()
+        # Sincronizar los índices de predicción con los de captura si están vacíos
+        if all(i is None for i in self.indices_asignados_prediccion):
+            self.indices_asignados_prediccion = self.indices_asignados.copy()
+            self._actualizar_selectores()
+
+        self.variable_mensaje_rojo.set(f"Cargando modelo: {ruta_modelo.name}")
+
+        def cargar_modelo_thread():
+            try:
+                self.modelo_prediccion_cargado = tf.keras.models.load_model(str(ruta_modelo), compile=False)
+                self.prediccion_en_curso = True
+                self.variable_mensaje_rojo.set(f"Prediccion IA activa: {ruta_modelo.name}")
+            except Exception as exc:
+                self.prediccion_en_curso = False
+                self.modelo_prediccion_cargado = None
+                self.raiz.after(
+                    0,
+                    lambda: messagebox.showerror(
+                        "Error al cargar modelo",
+                        str(exc),
+                    ),
+                )
+
+        threading.Thread(target=cargar_modelo_thread, daemon=True).start()
 
     def detener_prediccion_tiempo_real(self):
-        if not self.prediccion_en_curso and self.camara_prediccion is None:
+        if not self.prediccion_en_curso:
             return
 
-        self.detener_prediccion_evento.set()
-
-        if self.camara_prediccion is not None and self.camara_prediccion.isOpened():
-            self.camara_prediccion.release()
-        self.camara_prediccion = None
-
-        if self.etiqueta_prediccion is not None:
-            self.etiqueta_prediccion.configure(
-                image=self.imagen_negra_tk,
-                text="Prediccion detenida.",
-            )
-            self.etiqueta_prediccion.imagen_tk = self.imagen_negra_tk
-
-        if self.notebook_vistas is not None and self.tab_camaras is not None:
-            self.notebook_vistas.select(self.tab_camaras)
-
-        self.imagen_prediccion_tk = None
         self.prediccion_en_curso = False
+        self.modelo_prediccion_cargado = None
+
+        for i, etiqueta in enumerate(self.etiquetas_prediccion):
+            if i % 2 == 1:  # Solo actualizar las etiquetas de info
+                etiqueta.configure(text="En espera")
+
         self.variable_mensaje_rojo.set("Prediccion IA detenida.")
 
-    def _actualizar_frame_prediccion_ui(self, frame_rgb):
-        if self.etiqueta_prediccion is None:
-            return
+    def _actualizar_preview_prediccion(self):
+        """Actualiza continuamente el preview de las cámaras en la pestaña de predicción."""
+        while self.actualizando_preview_prediccion:
+            try:
+                frames_info = []
 
-        imagen = Image.fromarray(frame_rgb)
-        imagen_tk = ImageTk.PhotoImage(imagen)
-        self.imagen_prediccion_tk = imagen_tk
-        self.etiqueta_prediccion.configure(image=imagen_tk, text="")
-        self.etiqueta_prediccion.imagen_tk = imagen_tk
+                for i in range(4):
+                    indice_deseado = self.indices_asignados_prediccion[i]
+                    camara = None
 
-    def _ejecutar_prediccion_tiempo_real(self, ruta_modelo, indice_camara):
+                    # Buscar la cámara que corresponde al índice deseado
+                    if indice_deseado is not None:
+                        for slot, captura in enumerate(self.capturas):
+                            if captura is not None and self.indices_asignados[slot] == indice_deseado:
+                                camara = captura
+                                break
+
+                    if camara is not None and camara.isOpened():
+                        ok, frame = self._leer_frame_seguro(camara)
+                        if ok and frame is not None:
+                            frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                            prediccion = None
+
+                            # Si predicción está en curso, aplicar modelo
+                            if self.prediccion_en_curso and self.modelo_prediccion_cargado is not None:
+                                try:
+                                    entrada = cv2.resize(frame_rgb, (224, 224))
+                                    entrada = np.expand_dims(entrada.astype(np.float32), axis=0)
+                                    entrada = tf.keras.applications.mobilenet_v2.preprocess_input(entrada)
+
+                                    preds = np.asarray(self.modelo_prediccion_cargado.predict(entrada, verbose=0)[0]).squeeze()
+                                    if np.ndim(preds) > 0 and np.size(preds) > 1:
+                                        prediccion = float(preds[1])
+                                    else:
+                                        prediccion = float(preds)
+
+                                    # Dibujar resultado en el frame
+                                    if prediccion > 0.5:
+                                        texto_resultado = "BUHO DETECTADO"
+                                        color = (0, 255, 0)
+                                    else:
+                                        texto_resultado = "FONDO VACIO"
+                                        color = (0, 0, 255)
+
+                                    frame_bgr = cv2.cvtColor(frame_rgb, cv2.COLOR_RGB2BGR)
+                                    cv2.putText(
+                                        frame_bgr,
+                                        texto_resultado,
+                                        (20, 40),
+                                        cv2.FONT_HERSHEY_SIMPLEX,
+                                        1.0,
+                                        color,
+                                        2,
+                                        cv2.LINE_AA,
+                                    )
+                                    cv2.putText(
+                                        frame_bgr,
+                                        f"score: {prediccion:.3f}",
+                                        (20, 75),
+                                        cv2.FONT_HERSHEY_SIMPLEX,
+                                        0.7,
+                                        color,
+                                        2,
+                                        cv2.LINE_AA,
+                                    )
+                                    frame_rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
+                                    label_info = f"{texto_resultado} ({prediccion:.3f})"
+                                except Exception as e:
+                                    label_info = f"Error: {str(e)[:30]}"
+                            else:
+                                label_info = "En espera"
+
+                            frame_rgb = cv2.resize(frame_rgb, (self.ancho_cuadro, self.alto_cuadro))
+                            frames_info.append((frame_rgb, prediccion, label_info))
+                        else:
+                            frames_info.append((None, None, "Sin señal"))
+                    else:
+                        frames_info.append((None, None, "No asignada"))
+
+                self.raiz.after(0, self._actualizar_frames_prediccion_ui, frames_info)
+                time.sleep(0.033)  # ~30 FPS
+            except Exception:
+                time.sleep(0.033)
+
+    def _actualizar_frames_prediccion_ui(self, frames_info):
+        """Actualiza los 4 frames de predicción en la UI.
+        frames_info es una lista de 4 tuplas: (frame_rgb, prediccion, label_texto)
+        """
+        for i, (frame_rgb, prediccion, label_texto) in enumerate(frames_info):
+            # Actualizar frame de video (etiqueta par)
+            etiqueta_video_idx = i * 2
+            if frame_rgb is not None:
+                imagen = Image.fromarray(frame_rgb)
+                imagen_tk = ImageTk.PhotoImage(imagen)
+                self.imagenes_prediccion_tk[i] = imagen_tk
+                self.etiquetas_prediccion[etiqueta_video_idx].configure(image=imagen_tk, text="")
+                self.etiquetas_prediccion[etiqueta_video_idx].imagen_tk = imagen_tk
+            
+            # Actualizar etiqueta de información (etiqueta impar)
+            etiqueta_info_idx = i * 2 + 1
+            self.etiquetas_prediccion[etiqueta_info_idx].configure(text=label_texto)
+
+    def _ejecutar_prediccion_tiempo_real(self, ruta_modelo):
         try:
             from tensorflow.keras.models import load_model
+            from tensorflow.keras.applications.mobilenet_v2 import preprocess_input
 
             modelo = load_model(str(ruta_modelo), compile=False)
-            self.camara_prediccion = cv2.VideoCapture(indice_camara, cv2.CAP_DSHOW)
-            if not self.camara_prediccion.isOpened():
-                raise RuntimeError(f"No se pudo abrir la camara en indice {indice_camara}.")
+
+            # Usar los índices de predicción (que se sincronizan con captura al iniciar)
+            indices_prediccion = self.indices_asignados_prediccion
+
+            # Verificar que al menos una cámara esté disponible
+            camaras_disponibles = sum(1 for i in indices_prediccion if i is not None)
+            if camaras_disponibles == 0:
+                raise RuntimeError("No hay camaras disponibles. Asigna camaras en la pestaña 'Camaras'.")
 
             while not self.detener_prediccion_evento.is_set():
-                ok, frame = self.camara_prediccion.read()
-                if not ok or frame is None:
-                    continue
+                frames_info = []
 
-                entrada = cv2.resize(frame, (224, 224))
-                entrada = entrada.astype(np.float32) / 255.0
-                entrada = np.expand_dims(entrada, axis=0)
+                for i in range(4):
+                    indice_deseado = indices_prediccion[i]
+                    camara = None
+                    
+                    # Buscar la cámara que corresponde al índice deseado
+                    if indice_deseado is not None:
+                        for slot, captura in enumerate(self.capturas):
+                            if captura is not None and self.indices_asignados[slot] == indice_deseado:
+                                camara = captura
+                                break
+                    
+                    if camara is not None and camara.isOpened():
+                        ok, frame = self._leer_frame_seguro(camara)
+                        if ok and frame is not None:
+                            frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                            entrada = cv2.resize(frame_rgb, (224, 224))
+                            entrada = np.expand_dims(entrada.astype(np.float32), axis=0)
+                            entrada = preprocess_input(entrada)
 
-                prediccion = float(modelo.predict(entrada, verbose=0)[0][0])
-                if prediccion > 0.5:
-                    texto = "BÚHO DETECTADO"
-                    color = (0, 255, 0)
-                else:
-                    texto = "FONDO VACÍO"
-                    color = (0, 0, 255)
+                            preds = np.asarray(modelo.predict(entrada, verbose=0)[0]).squeeze()
+                            if np.ndim(preds) > 0 and np.size(preds) > 1:
+                                prediccion = float(preds[1])
+                            else:
+                                prediccion = float(preds)
 
-                cv2.putText(
-                    frame,
-                    texto,
-                    (20, 40),
-                    cv2.FONT_HERSHEY_SIMPLEX,
-                    1.0,
-                    color,
-                    2,
-                    cv2.LINE_AA,
-                )
-                cv2.putText(
-                    frame,
-                    f"score: {prediccion:.3f}",
-                    (20, 75),
-                    cv2.FONT_HERSHEY_SIMPLEX,
-                    0.7,
-                    color,
-                    2,
-                    cv2.LINE_AA,
-                )
+                            # Dibujar resultado en el frame
+                            if prediccion > 0.5:
+                                texto_resultado = "BUHO DETECTADO"
+                                color = (0, 255, 0)
+                            else:
+                                texto_resultado = "FONDO VACIO"
+                                color = (0, 0, 255)
 
-                frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                self.raiz.after(0, self._actualizar_frame_prediccion_ui, frame_rgb)
+                            cv2.putText(
+                                frame,
+                                texto_resultado,
+                                (20, 40),
+                                cv2.FONT_HERSHEY_SIMPLEX,
+                                1.0,
+                                color,
+                                2,
+                                cv2.LINE_AA,
+                            )
+                            cv2.putText(
+                                frame,
+                                f"score: {prediccion:.3f}",
+                                (20, 75),
+                                cv2.FONT_HERSHEY_SIMPLEX,
+                                0.7,
+                                color,
+                                2,
+                                cv2.LINE_AA,
+                            )
+
+                            frame_display = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                            label_info = f"{texto_resultado} ({prediccion:.3f})"
+                            frames_info.append((frame_display, prediccion, label_info))
+                        else:
+                            frames_info.append((None, None, "Sin señal"))
+                    else:
+                        frames_info.append((None, None, "No asignada"))
+
+                self.raiz.after(0, self._actualizar_frames_prediccion_ui, frames_info)
+                time.sleep(0.03)  # ~30 FPS
 
             if self.detener_prediccion_evento.is_set():
                 self.raiz.after(0, lambda: self.variable_mensaje_rojo.set("Prediccion IA detenida."))
@@ -898,9 +1132,6 @@ class InterfazCuatroCamaras:
                 ),
             )
         finally:
-            if self.camara_prediccion is not None and self.camara_prediccion.isOpened():
-                self.camara_prediccion.release()
-            self.camara_prediccion = None
             self.prediccion_en_curso = False
 
     def _actualizar_vistas(self):
@@ -966,12 +1197,18 @@ class InterfazCuatroCamaras:
         self.raiz.after(33, self._actualizar_vistas)
 
     def cerrar(self):
+        self.actualizando_preview_prediccion = False
         if self.prediccion_en_curso:
             self.detener_prediccion_tiempo_real()
 
         for camara in self.capturas:
             if camara is not None and camara.isOpened():
                 camara.release()
+        
+        for camara in self.camaras_prediccion:
+            if camara is not None and camara.isOpened():
+                camara.release()
+        
         self.raiz.destroy()
 
 

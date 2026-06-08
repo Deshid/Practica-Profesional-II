@@ -1,3 +1,9 @@
+# Rec.py: Interfaz para captura y predicción.
+# - Ejecutar `Rec.py` para lanzar la UI.
+# - Este archivo combina la interfaz (Tkinter) con la lógica de captura
+#   (OpenCV) y predicción (TensorFlow/Keras).
+# Comentarios en el código explican los bloques principales.
+
 import os
 import re
 import subprocess
@@ -5,18 +11,31 @@ import json
 import importlib
 import threading
 import time
+import warnings
 from pathlib import Path
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
 os.environ.setdefault("OPENCV_LOG_LEVEL", "ERROR")
-os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "2")
+os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "3")
 os.environ.setdefault("TF_ENABLE_ONEDNN_OPTS", "0")
+warnings.filterwarnings("ignore", message=r"From .* tf\.placeholder is deprecated.*")
+warnings.filterwarnings("ignore", message=r"TensorFlow GPU support is not available on native Windows.*")
 import cv2
 import numpy as np
 from PIL import Image, ImageTk
 import tensorflow as tf
 
+tf.get_logger().setLevel("ERROR")
+try:
+    import absl.logging as absl_logging
+
+    absl_logging.set_verbosity("error")
+    absl_logging.set_stderrthreshold("error")
+except Exception:
+    pass
+
+# Clase principal que construye la ventana y gestiona la interacción
 class InterfazCuatroCamaras:
     def __init__(self, raiz):
         self.raiz = raiz
@@ -32,20 +51,29 @@ class InterfazCuatroCamaras:
                 f"{self.raiz.winfo_screenwidth()}x{self.raiz.winfo_screenheight()}+0+0"
             )
 
+        # Tamaño por defecto de los cuadros de preview (ancho x alto)
         self.ancho_cuadro = 300
         self.alto_cuadro = 220
 
-        self.capturas = [None, None, None, None]
-        self.dispositivos = []
-        self.variables_selector = []
-        self.comboboxes = []
-        self.opcion_a_indice = {}
-        self.indices_activos = set()
-        self.indices_asignados = [None, None, None, None]
-        self.version_slot = [0, 0, 0, 0]
-        self.cargando_slot = [False, False, False, False]
-        self.etiquetas_video = []
-        self.variables_mensaje_slot = []
+        # Cache de ruta base del proyecto y configuración del tamaño de entrada
+        # para los modelos de predicción (por ejemplo MobileNetV2 usa 224x224)
+        self.base_dir = os.path.dirname(os.path.abspath(__file__))
+        self.modelo_input_size = (224, 224)
+
+        # Estructuras y estado relacionados con las cámaras (hasta 4 slots)
+        self.capturas = [None, None, None, None]  # objetos cv2.VideoCapture o None
+        self.dispositivos = []  # lista de dispositivos detectados por sistema
+        self.variables_selector = []  # StringVar para cada combobox UI (captura)
+        self.comboboxes = []  # referencias a los combobox de UI (captura)
+        self.opcion_a_indice = {}  # mapeo texto opción -> indice de dispositivo
+        self.indices_activos = set()  # indices detectados y válidos
+        self.indices_asignados = [None, None, None, None]  # indice asignado por slot
+        self.version_slot = [0, 0, 0, 0]  # control de versiones para apertura asíncrona
+        self.cargando_slot = [False, False, False, False]  # flags de estado de apertura
+        self.etiquetas_video = []  # widgets de Label para previews (captura)
+        self.variables_mensaje_slot = []  # mensajes por slot (captura)
+
+        # Estado para captura y guardado
         self.imagen_negra_tk = None
         self.capturando = False
         self.ultimo_disparo = 0.0
@@ -61,8 +89,11 @@ class InterfazCuatroCamaras:
             "objeto_d",
             "fondo_vacio",
         ]
+
+        # Variables de UI y mensajes
         self.variable_mensaje_rojo = tk.StringVar(value="")
-        self.indice_camara_ia = tk.StringVar(value="0")
+
+        # Estado y objetos para predicción IA
         self.ruta_modelo_ia = None
         self.variable_modelo_ia = tk.StringVar(value="Sin modelo seleccionado")
         self.prediccion_en_curso = False
@@ -70,10 +101,6 @@ class InterfazCuatroCamaras:
         self.notebook_vistas = None
         self.tab_camaras = None
         self.tab_prediccion = None
-        self.etiqueta_prediccion = None
-        self.imagen_prediccion_tk = None
-        self.camara_prediccion = None
-        self.camaras_prediccion = [None, None, None, None]
         self.etiquetas_prediccion = []
         self.imagenes_prediccion_tk = [None, None, None, None]
         self.cuadricula_prediccion = None
@@ -91,6 +118,7 @@ class InterfazCuatroCamaras:
         threading.Thread(target=self._actualizar_preview_prediccion, daemon=True).start()
 
     def _construir_ui(self):
+        # Construcción de la interfaz: layout, estilos y widgets.
         self.raiz.columnconfigure(0, weight=1)
         self.raiz.rowconfigure(0, weight=1)
         
@@ -99,14 +127,7 @@ class InterfazCuatroCamaras:
         estilo = ttk.Style()
         estilo.theme_use("clam")
         
-        # Colores oscuros para el tema
-        colores_oscuros = {
-            "bg": "#1e1e1e",
-            "fg": "#e0e0e0",
-            "fieldbg": "#2d2d2d",
-            "fieldtext": "#ffffff",
-            "activecolor": "#404040",
-        }
+        # Tema oscuro (colores aplicados directamente en estilos)
         
         # Configurar colores para Frame
         estilo.configure("TFrame", background="#1e1e1e", foreground="#e0e0e0")
@@ -120,8 +141,12 @@ class InterfazCuatroCamaras:
         estilo.configure("TCombobox", fieldbackground="#2d2d2d", background="#2d2d2d", foreground="#000000")
         estilo.configure("TEntry", fieldbackground="#2d2d2d", background="#2d2d2d", foreground="#ffffff")
         estilo.configure("TNotebook", background="#1e1e1e", borderwidth=0)
-        estilo.configure("TNotebook.Tab", background="#252525", foreground="#ffffff", padding=[20, 10])
-        estilo.map("TNotebook.Tab", background=[("selected", "#2d2d2d")])
+        estilo.configure("TNotebook.Tab", background="#252525", foreground="#ffffff", padding=[10, 4])
+        estilo.map(
+            "TNotebook.Tab",
+            background=[("selected", "#252525"), ("active", "#252525")],
+            foreground=[("selected", "#ffffff"), ("active", "#ffffff")],
+        )
 
         contenedor = ttk.Frame(self.raiz, padding=8)
         contenedor.grid(row=0, column=0, sticky="nsew")
@@ -130,7 +155,7 @@ class InterfazCuatroCamaras:
 
         ttk.Label(
             contenedor,
-            text="Captura de datos para matching learning",
+            text="Captura de datos para machine learning",
             font=("Segoe UI", 16, "bold"),
             anchor="center",
             justify="center",
@@ -147,8 +172,13 @@ class InterfazCuatroCamaras:
         self.notebook_vistas.add(self.tab_camaras, text="Camaras")
         self.notebook_vistas.add(self.tab_prediccion, text="Prediccion IA")
 
-        cuadricula = ttk.Frame(self.tab_camaras)
-        cuadricula.pack(fill="both", expand=True)
+        contenedor_camaras = ttk.Frame(self.tab_camaras)
+        contenedor_camaras.pack(fill="both", expand=True)
+        contenedor_camaras.columnconfigure(0, weight=1)
+        contenedor_camaras.rowconfigure(0, weight=1)
+
+        cuadricula = ttk.Frame(contenedor_camaras)
+        cuadricula.grid(row=0, column=0, sticky="nsew")
         for fila in range(2):
             cuadricula.rowconfigure(fila, weight=1)
         for columna in range(2):
@@ -234,6 +264,20 @@ class InterfazCuatroCamaras:
             command=self.detener_prediccion_tiempo_real,
         ).pack(side="left", padx=(8, 0))
 
+        self.etiqueta_mensaje_rojo = tk.Label(
+            panel_prediccion,
+            textvariable=self.variable_mensaje_rojo,
+            font=("Segoe UI", 11, "bold"),
+            fg="#C00000",
+            bg="#1e1e1e",
+            anchor="w",
+            justify="left",
+            wraplength=640,
+            padx=4,
+            pady=2,
+        )
+        self.etiqueta_mensaje_rojo.pack(fill="x", pady=(0, 4))
+
         # Cuadrícula para 4 cámaras de predicción
         self.cuadricula_prediccion = ttk.Frame(panel_prediccion)
         self.cuadricula_prediccion.pack(fill="both", expand=True, pady=(8, 0))
@@ -293,23 +337,9 @@ class InterfazCuatroCamaras:
             etiqueta_info.pack(fill="x", padx=4, pady=(0, 4))
             self.etiquetas_prediccion.append(etiqueta_info)
 
-        self.fila_ruta = ttk.Frame(contenedor)
-        self.fila_ruta.grid(row=2, column=0, sticky="ew", pady=(2, 0))
+        self.fila_ruta = ttk.Frame(contenedor_camaras)
+        self.fila_ruta.grid(row=1, column=0, sticky="ew", pady=(2, 0))
         self.fila_ruta.columnconfigure(0, weight=1)
-
-        self.etiqueta_mensaje_rojo = tk.Label(
-            self.fila_ruta,
-            textvariable=self.variable_mensaje_rojo,
-            font=("Segoe UI", 11, "bold"),
-            fg="#C00000",
-            bg="#1e1e1e",
-            anchor="w",
-            justify="left",
-            wraplength=640,
-            padx=4,
-            pady=2,
-        )
-        self.etiqueta_mensaje_rojo.grid(row=0, column=0, sticky="ew")
 
         self.boton_copiar_ruta = ttk.Button(
             self.fila_ruta,
@@ -319,8 +349,8 @@ class InterfazCuatroCamaras:
         self.boton_copiar_ruta.grid(row=0, column=1, padx=(8, 0), sticky="e")
         self.boton_copiar_ruta.grid_remove()
 
-        controles = ttk.Frame(contenedor, padding=(0, 6, 0, 0))
-        controles.grid(row=3, column=0, sticky="ew")
+        controles = ttk.Frame(contenedor_camaras, padding=(0, 6, 0, 0))
+        controles.grid(row=2, column=0, sticky="ew")
         controles.columnconfigure(0, weight=1)
 
         fila_intervalo = ttk.Frame(controles)
@@ -345,10 +375,10 @@ class InterfazCuatroCamaras:
 
         botones = ttk.Frame(controles)
         botones.grid(row=0, column=1, sticky="e")
-        ttk.Button(botones, text="Iniciar", command=self.iniciar_captura).grid(
+        ttk.Button(botones, text="Iniciar captura", command=self.iniciar_captura).grid(
             row=0, column=0, padx=(0, 6)
         )
-        ttk.Button(botones, text="Detener", command=self.detener_captura).grid(row=0, column=1)
+        ttk.Button(botones, text="Detener captura", command=self.detener_captura).grid(row=0, column=1)
         ttk.Button(
             botones,
             text="Detectar camaras",
@@ -370,6 +400,11 @@ class InterfazCuatroCamaras:
         )
         self.etiqueta_estado.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(8, 0))
 
+    # ------------------------------------------------------------------
+    # Diseño / Construcción de la Interfaz (UI)
+    # Métodos relacionados exclusivamente con la disposición y estilos
+    # ------------------------------------------------------------------
+
     def _al_redimensionar(self, _evento=None):
         ancho_actual = max(400, self.raiz.winfo_width() - 40)
         self.etiqueta_estado.configure(wraplength=ancho_actual)
@@ -386,13 +421,21 @@ class InterfazCuatroCamaras:
         self.raiz.state("normal")
 
     def _leer_intervalo(self):
+        # Leer y validar el intervalo entre capturas desde el Entry.
         try:
             valor = float(self.variable_intervalo.get())
         except ValueError:
             valor = 3.0
         self.intervalo_segundos = max(0.5, valor)
 
+    # ------------------------------------------------------------------
+    # Control de captura
+    # Inicio/detención de captura y funciones de guardado
+    # ------------------------------------------------------------------
+
     def iniciar_captura(self):
+        # Inicia el proceso de captura: valida etiqueta, prepara carpeta y
+        # reinicia contadores. El guardado real ocurre en el loop de refresco.
         self._leer_intervalo()
         etiqueta_objeto = self._normalizar_etiqueta_objeto(self.variable_objeto.get())
         if not etiqueta_objeto:
@@ -437,6 +480,10 @@ class InterfazCuatroCamaras:
                 "No hay ruta de dataset para copiar aun."
             )
 
+    # ------------------------------------------------------------------
+    # Utilidades de nombre/archivo y guardado
+    # ------------------------------------------------------------------
+
     def _normalizar_etiqueta_objeto(self, etiqueta):
         etiqueta_limpia = (etiqueta or "").strip().lower()
         etiqueta_limpia = re.sub(r"\s+", "_", etiqueta_limpia)
@@ -444,8 +491,8 @@ class InterfazCuatroCamaras:
         return etiqueta_limpia
 
     def _asegurar_carpeta_objeto(self, etiqueta_objeto):
-        base_script = os.path.dirname(os.path.abspath(__file__))
-        carpeta_dataset = os.path.join(base_script, "dataset")
+        # Crea `dataset/` y la subcarpeta para la etiqueta si no existen.
+        carpeta_dataset = os.path.join(self.base_dir, "dataset")
         os.makedirs(carpeta_dataset, exist_ok=True)
 
         # Carpeta para clase negativa recomendada en matching learning.
@@ -496,8 +543,13 @@ class InterfazCuatroCamaras:
 
         return guardadas, estado_por_slot
 
+    # ------------------------------------------------------------------
+    # Manejo de cámaras y dispositivos
+    # Apertura de cámaras, lectura segura, detección y asignación
+    # ------------------------------------------------------------------
+
     def _abrir_camara(self, indice):
-        # Para indices de Windows, DSHOW suele responder mas rapido y evita pruebas extra.
+        # Intentar abrir captura con DirectShow en Windows (mejor respuesta).
         camara = cv2.VideoCapture(indice, cv2.CAP_DSHOW)
         if not camara.isOpened():
             camara.release()
@@ -514,12 +566,18 @@ class InterfazCuatroCamaras:
             return False, None
 
     def _obtener_nombres_sistema(self):
+        # Intenta usar pygrabber para obtener nombres amigables de dispositivos.
         try:
             modulo = importlib.import_module("pygrabber.dshow_graph")
             FilterGraph = getattr(modulo, "FilterGraph")
             return FilterGraph().get_input_devices()
         except Exception:
             return []
+
+        # ------------------------------------------------------------------
+        # Predicción IA y preview
+        # Selección de modelo, carga y loop de predicción en background
+        # ------------------------------------------------------------------
 
     def _normalizar_nombre(self, nombre):
         return " ".join(nombre.lower().split())
@@ -593,6 +651,8 @@ class InterfazCuatroCamaras:
         return mapa
 
     def _detectar_dispositivos(self):
+        # Detecta dispositivos disponibles y construye una lista de diccionarios
+        # con la forma: {"indice": int, "nombre": str, "puerto": str}
         nombres = self._obtener_nombres_sistema()
         mapa_usb = self._obtener_info_usb_windows()
         dispositivos = []
@@ -858,14 +918,14 @@ class InterfazCuatroCamaras:
         self.detectar_camaras()
 
     def _seleccionar_modelo_h5(self):
-        base_dir = Path(__file__).resolve().parent
-        ruta_default = base_dir / "modelos" / "modelo_buho_v1.h5"
-        ruta_inicial = ruta_default if ruta_default.exists() else base_dir
+        # Abre un diálogo para seleccionar un archivo .h5 de modelo Keras.
+        carpeta_modelos = Path(self.base_dir) / "modelos"
+
+        ruta_inicial = carpeta_modelos if carpeta_modelos.exists() else Path(self.base_dir)
 
         ruta_modelo = filedialog.askopenfilename(
             title="Selecciona modelo Keras (.h5)",
             initialdir=str(ruta_inicial),
-            initialfile="modelo_buho_v1.h5",
             filetypes=[("Modelos Keras", "*.h5"), ("Todos los archivos", "*.*")],
         )
 
@@ -902,9 +962,19 @@ class InterfazCuatroCamaras:
 
         self.variable_mensaje_rojo.set(f"Cargando modelo: {ruta_modelo.name}")
 
+        # Carga el modelo en un hilo separado para no bloquear la UI.
         def cargar_modelo_thread():
             try:
-                self.modelo_prediccion_cargado = tf.keras.models.load_model(str(ruta_modelo), compile=False)
+                with warnings.catch_warnings():
+                    warnings.filterwarnings("ignore", message=r"From .* tf\.placeholder is deprecated.*")
+                    warnings.filterwarnings("ignore", message=r"TensorFlow GPU support is not available on native Windows.*")
+                    self.modelo_prediccion_cargado = tf.keras.models.load_model(
+                        str(ruta_modelo),
+                        compile=False,
+                        custom_objects={
+                            "preprocess_input": tf.keras.applications.mobilenet_v2.preprocess_input,
+                        },
+                    )
                 self.prediccion_en_curso = True
                 self.variable_mensaje_rojo.set(f"Prediccion IA activa: {ruta_modelo.name}")
             except Exception as exc:
@@ -939,6 +1009,19 @@ class InterfazCuatroCamaras:
             try:
                 frames_info = []
 
+                # Cache locales para optimizar llamadas a atributos y funciones
+                model = self.modelo_prediccion_cargado
+                pred_activa = self.prediccion_en_curso and model is not None
+                preprocess = (
+                    tf.keras.applications.mobilenet_v2.preprocess_input
+                    if pred_activa
+                    else None
+                )
+                ancho = self.ancho_cuadro
+                alto = self.alto_cuadro
+                resize = cv2.resize
+                cvt = cv2.cvtColor
+
                 for i in range(4):
                     indice_deseado = self.indices_asignados_prediccion[i]
                     camara = None
@@ -953,17 +1036,17 @@ class InterfazCuatroCamaras:
                     if camara is not None and camara.isOpened():
                         ok, frame = self._leer_frame_seguro(camara)
                         if ok and frame is not None:
-                            frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                            frame_rgb = cvt(frame, cv2.COLOR_BGR2RGB)
                             prediccion = None
 
                             # Si predicción está en curso, aplicar modelo
-                            if self.prediccion_en_curso and self.modelo_prediccion_cargado is not None:
+                            if pred_activa:
                                 try:
-                                    entrada = cv2.resize(frame_rgb, (224, 224))
+                                    entrada = resize(frame_rgb, self.modelo_input_size)
                                     entrada = np.expand_dims(entrada.astype(np.float32), axis=0)
-                                    entrada = tf.keras.applications.mobilenet_v2.preprocess_input(entrada)
+                                    entrada = preprocess(entrada)
 
-                                    preds = np.asarray(self.modelo_prediccion_cargado.predict(entrada, verbose=0)[0]).squeeze()
+                                    preds = np.asarray(model.predict(entrada, verbose=0)[0]).squeeze()
                                     if np.ndim(preds) > 0 and np.size(preds) > 1:
                                         prediccion = float(preds[1])
                                     else:
@@ -977,7 +1060,7 @@ class InterfazCuatroCamaras:
                                         texto_resultado = "FONDO VACIO"
                                         color = (0, 0, 255)
 
-                                    frame_bgr = cv2.cvtColor(frame_rgb, cv2.COLOR_RGB2BGR)
+                                    frame_bgr = cvt(frame_rgb, cv2.COLOR_RGB2BGR)
                                     cv2.putText(
                                         frame_bgr,
                                         texto_resultado,
@@ -998,14 +1081,14 @@ class InterfazCuatroCamaras:
                                         2,
                                         cv2.LINE_AA,
                                     )
-                                    frame_rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
+                                    frame_rgb = cvt(frame_bgr, cv2.COLOR_BGR2RGB)
                                     label_info = f"{texto_resultado} ({prediccion:.3f})"
                                 except Exception as e:
                                     label_info = f"Error: {str(e)[:30]}"
                             else:
                                 label_info = "En espera"
 
-                            frame_rgb = cv2.resize(frame_rgb, (self.ancho_cuadro, self.alto_cuadro))
+                            frame_rgb = resize(frame_rgb, (ancho, alto))
                             frames_info.append((frame_rgb, prediccion, label_info))
                         else:
                             frames_info.append((None, None, "Sin señal"))
@@ -1034,109 +1117,18 @@ class InterfazCuatroCamaras:
             # Actualizar etiqueta de información (etiqueta impar)
             etiqueta_info_idx = i * 2 + 1
             self.etiquetas_prediccion[etiqueta_info_idx].configure(text=label_texto)
-
-    def _ejecutar_prediccion_tiempo_real(self, ruta_modelo):
-        try:
-            from tensorflow.keras.models import load_model
-            from tensorflow.keras.applications.mobilenet_v2 import preprocess_input
-
-            modelo = load_model(str(ruta_modelo), compile=False)
-
-            # Usar los índices de predicción (que se sincronizan con captura al iniciar)
-            indices_prediccion = self.indices_asignados_prediccion
-
-            # Verificar que al menos una cámara esté disponible
-            camaras_disponibles = sum(1 for i in indices_prediccion if i is not None)
-            if camaras_disponibles == 0:
-                raise RuntimeError("No hay camaras disponibles. Asigna camaras en la pestaña 'Camaras'.")
-
-            while not self.detener_prediccion_evento.is_set():
-                frames_info = []
-
-                for i in range(4):
-                    indice_deseado = indices_prediccion[i]
-                    camara = None
-                    
-                    # Buscar la cámara que corresponde al índice deseado
-                    if indice_deseado is not None:
-                        for slot, captura in enumerate(self.capturas):
-                            if captura is not None and self.indices_asignados[slot] == indice_deseado:
-                                camara = captura
-                                break
-                    
-                    if camara is not None and camara.isOpened():
-                        ok, frame = self._leer_frame_seguro(camara)
-                        if ok and frame is not None:
-                            frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                            entrada = cv2.resize(frame_rgb, (224, 224))
-                            entrada = np.expand_dims(entrada.astype(np.float32), axis=0)
-                            entrada = preprocess_input(entrada)
-
-                            preds = np.asarray(modelo.predict(entrada, verbose=0)[0]).squeeze()
-                            if np.ndim(preds) > 0 and np.size(preds) > 1:
-                                prediccion = float(preds[1])
-                            else:
-                                prediccion = float(preds)
-
-                            # Dibujar resultado en el frame
-                            if prediccion > 0.5:
-                                texto_resultado = "BUHO DETECTADO"
-                                color = (0, 255, 0)
-                            else:
-                                texto_resultado = "FONDO VACIO"
-                                color = (0, 0, 255)
-
-                            cv2.putText(
-                                frame,
-                                texto_resultado,
-                                (20, 40),
-                                cv2.FONT_HERSHEY_SIMPLEX,
-                                1.0,
-                                color,
-                                2,
-                                cv2.LINE_AA,
-                            )
-                            cv2.putText(
-                                frame,
-                                f"score: {prediccion:.3f}",
-                                (20, 75),
-                                cv2.FONT_HERSHEY_SIMPLEX,
-                                0.7,
-                                color,
-                                2,
-                                cv2.LINE_AA,
-                            )
-
-                            frame_display = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                            label_info = f"{texto_resultado} ({prediccion:.3f})"
-                            frames_info.append((frame_display, prediccion, label_info))
-                        else:
-                            frames_info.append((None, None, "Sin señal"))
-                    else:
-                        frames_info.append((None, None, "No asignada"))
-
-                self.raiz.after(0, self._actualizar_frames_prediccion_ui, frames_info)
-                time.sleep(0.03)  # ~30 FPS
-
-            if self.detener_prediccion_evento.is_set():
-                self.raiz.after(0, lambda: self.variable_mensaje_rojo.set("Prediccion IA detenida."))
-            else:
-                self.raiz.after(0, lambda: self.variable_mensaje_rojo.set("Prediccion IA finalizada."))
-        except Exception as exc:
-            mensaje_error = str(exc)
-            self.raiz.after(
-                0,
-                lambda m=mensaje_error: messagebox.showerror(
-                    "Error en prediccion IA",
-                    m,
-                ),
-            )
-        finally:
-            self.prediccion_en_curso = False
+    # ------------------------------------------------------------------
+    # Actualización de vistas y limpieza
+    # Actualiza frames principales, manejo de captura periódica y cierre
+    # ------------------------------------------------------------------
 
     def _actualizar_vistas(self):
         conectadas = 0
         frames_disponibles = [None, None, None, None]
+        ancho = self.ancho_cuadro
+        alto = self.alto_cuadro
+        resize = cv2.resize
+        cvt = cv2.cvtColor
 
         for i, camara in enumerate(self.capturas):
             ok, frame = (
@@ -1147,9 +1139,9 @@ class InterfazCuatroCamaras:
 
             if ok and frame is not None:
                 conectadas += 1
-                frame = cv2.resize(frame, (self.ancho_cuadro, self.alto_cuadro))
+                frame = resize(frame, (ancho, alto))
                 frames_disponibles[i] = frame.copy()
-                frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                frame_rgb = cvt(frame, cv2.COLOR_BGR2RGB)
                 imagen = Image.fromarray(frame_rgb)
                 imagen_tk = ImageTk.PhotoImage(imagen)
                 self.etiquetas_video[i].configure(image=imagen_tk, text="", bg="black")
@@ -1202,10 +1194,6 @@ class InterfazCuatroCamaras:
             self.detener_prediccion_tiempo_real()
 
         for camara in self.capturas:
-            if camara is not None and camara.isOpened():
-                camara.release()
-        
-        for camara in self.camaras_prediccion:
             if camara is not None and camara.isOpened():
                 camara.release()
         
